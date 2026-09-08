@@ -1,0 +1,17 @@
+{
+  "input_prs": 361296,
+  "input_discussion_rows": 944499,
+  "resolved_same_repository_mentions": 15343,
+  "excluded_a_pairs": 124,
+  "candidate_pairs_all_b": 7297,
+  "candidate_pairs_exported": 1500,
+  "tier_counts_exported": {
+    "A_explicit_duplicate_cue": 808,
+    "B_repeated_or_cross_evidence_reference": 692
+  },
+  "max_candidates": 1500,
+  "rule_matches_path": "results\\aidev76_duppr\\rule_matches.csv",
+  "unmapped_inline_review_comments": 0,
+  "inline_review_id_fallbacks": 0,
+  "interpretation": "B-layer high-recall references for manual review; A-layer pairs excluded; no duplicate label inferred"
+}
