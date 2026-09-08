@@ -6,7 +6,6 @@ The tests do not rebuild data and deliberately ignore legacy, unsharded
 """
 from __future__ import annotations
 
-import re
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
@@ -23,9 +22,6 @@ REVIEW_COLUMNS = [
     "evidence_notes", "reviewer_id", "reviewed_at_utc",
 ]
 TEMPLATE_NAMES = ("reviewer_1.csv", "reviewer_2.csv", "adjudication.csv")
-GITHUB_PREFIX = "/cjllz/EMSE/blob/cjllz-rq1/"
-
-
 class HTMLReviewParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -145,7 +141,8 @@ class RQ1ReleaseTests(unittest.TestCase):
     def _assert_pair_link(self, link: str, source: Path) -> str:
         parsed = urlsplit(link)
         self.assertFalse(parsed.scheme, link)
-        self.assertEqual(unquote(parsed.path), "review.html", link)
+        allowed_paths = ("", "review.html") if source.name == "review.html" else ("review.html",)
+        self.assertIn(unquote(parsed.path), allowed_paths, link)
         target = source.parent / "review.html"
         target = target.resolve()
         self.assertTrue(target.is_relative_to(ROOT), link)
@@ -166,8 +163,7 @@ class RQ1ReleaseTests(unittest.TestCase):
                         self.assertEqual(self._assert_pair_link(row.evidence_page, layer_dir / name), row.pair_id)
                 review = layer_dir / "review.html"
                 self.assertTrue(review.is_file())
-                parser = HTMLReviewParser()
-                parser.feed(review.read_text(encoding="utf-8"))
+                parser = self.review_parsers[layer]
                 html_pairs = {anchor.removeprefix("pair-") for anchor in parser.ids if anchor.startswith("pair-")}
                 self.assertEqual(html_pairs, expected_pairs)
                 self.assertEqual(len(html_pairs), len(expected_pairs))
