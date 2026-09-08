@@ -1,0 +1,44 @@
+{
+  "A": {
+    "layer": "A",
+    "candidate_pairs": 124,
+    "unique_prs": 239,
+    "repositories": 63,
+    "discussion_rows": 1261,
+    "required_evidence_ids": 133,
+    "missing_evidence_ids": 0,
+    "comment_shards": [
+      "comment_evidence_01.parquet"
+    ],
+    "review_pages": 4,
+    "same_author_pairs": 0,
+    "prior_comment_awareness_pairs": 0,
+    "snapshot_reference_pairs": 37,
+    "manual_labels_filled": 0
+  },
+  "B_priority": {
+    "layer": "B",
+    "candidate_pairs": 1500,
+    "unique_prs": 2479,
+    "repositories": 524,
+    "discussion_rows": 28054,
+    "required_evidence_ids": 2406,
+    "missing_evidence_ids": 0,
+    "comment_shards": [
+      "comment_evidence_01.parquet",
+      "comment_evidence_02.parquet",
+      "comment_evidence_03.parquet",
+      "comment_evidence_04.parquet",
+      "comment_evidence_05.parquet",
+      "comment_evidence_06.parquet"
+    ],
+    "review_pages": 38,
+    "same_author_pairs": 1309,
+    "prior_comment_awareness_pairs": 380,
+    "snapshot_reference_pairs": 334,
+    "manual_labels_filled": 0
+  },
+  "B_pool_pairs": 7297,
+  "A_B_pair_overlap": 0,
+  "interpretation": "RQ1 candidate construction stage; annotation incomplete; no confirmed count or prevalence estimate."
+}
