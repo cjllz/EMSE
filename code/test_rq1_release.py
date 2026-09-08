@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -23,6 +24,20 @@ REVIEW_COLUMNS = [
 ]
 TEMPLATE_NAMES = ("reviewer_1.csv", "reviewer_2.csv", "adjudication.csv")
 GITHUB_PREFIX = "/cjllz/EMSE/blob/cjllz-rq1/"
+
+
+class HTMLReviewParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: set[str] = set()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = dict(attrs)
+        if attr.get("id"):
+            self.ids.add(str(attr["id"]))
+        if tag == "a" and attr.get("href"):
+            self.hrefs.append(str(attr["href"]))
 
 
 def read_csv(path: Path) -> pd.DataFrame:
@@ -58,6 +73,12 @@ class RQ1ReleaseTests(unittest.TestCase):
             }
             for layer in ("A", "B")
         }
+        cls.review_parsers = {}
+        for layer in ("A", "B"):
+            review = ROOT / f"{layer.lower()}_layer" / "review.html"
+            parser = HTMLReviewParser()
+            parser.feed(review.read_text(encoding="utf-8"))
+            cls.review_parsers[layer] = parser
 
     def test_candidate_counts_and_unique_pairs(self) -> None:
         expected = ((self.candidates["A"], 124), (self.a_strict, 87),
@@ -90,7 +111,9 @@ class RQ1ReleaseTests(unittest.TestCase):
                     self.assertEqual(frame["layer"].tolist(), [layer] * len(frame))
                     self.assertEqual(frame["pr_url_a"].tolist(), candidates["html_url_a"].tolist())
                     self.assertEqual(frame["pr_url_b"].tolist(), candidates["html_url_b"].tolist())
-                    self.assertEqual(frame["evidence_page"].tolist(), reference["evidence_page"].tolist())
+                    expected_pages = [f"review.html#pair-{pair_id}" for pair_id in candidates["pair_id"]]
+                    self.assertEqual(frame["evidence_page"].tolist(), expected_pages)
+                    self.assertEqual(reference["evidence_page"].tolist(), expected_pages)
                     self.assertTrue(frame["evidence_page"].str.len().gt(0).all())
                     for column in REVIEW_COLUMNS[5:]:
                         self.assertTrue(frame[column].eq("").all(), f"Nonempty {column}")
@@ -121,19 +144,16 @@ class RQ1ReleaseTests(unittest.TestCase):
 
     def _assert_pair_link(self, link: str, source: Path) -> str:
         parsed = urlsplit(link)
-        if parsed.scheme:
-            self.assertEqual(parsed.netloc, "github.com", link)
-            self.assertTrue(parsed.path.startswith(GITHUB_PREFIX), link)
-            target = ROOT / unquote(parsed.path[len(GITHUB_PREFIX):])
-        else:
-            target = source.parent / unquote(parsed.path)
+        self.assertFalse(parsed.scheme, link)
+        self.assertEqual(unquote(parsed.path), "review.html", link)
+        target = source.parent / "review.html"
         target = target.resolve()
         self.assertTrue(target.is_relative_to(ROOT), link)
         self.assertTrue(target.is_file(), link)
         anchor = unquote(parsed.fragment)
         self.assertTrue(anchor.startswith("pair-"), link)
-        headings = set(re.findall(r"^## (pair-[0-9]+_[0-9]+)\s*$", target.read_text(encoding="utf-8"), re.M))
-        self.assertIn(anchor, headings, link)
+        parser = self.review_parsers[source.parent.name[0].upper()]
+        self.assertIn(anchor, parser.ids, link)
         return anchor.removeprefix("pair-")
 
     def test_all_generated_pair_links_and_page_anchors_exist(self) -> None:
@@ -144,16 +164,16 @@ class RQ1ReleaseTests(unittest.TestCase):
                 for name, frame in self.templates[layer].items():
                     for row in frame.itertuples(index=False):
                         self.assertEqual(self._assert_pair_link(row.evidence_page, layer_dir / name), row.pair_id)
-                index = layer_dir / "REVIEW_INDEX.md"
-                links = re.findall(r"\]\(([^)]+#pair-[0-9]+_[0-9]+)\)", index.read_text(encoding="utf-8"))
-                linked_pairs = [self._assert_pair_link(link, index) for link in links]
-                self.assertEqual(len(linked_pairs), len(expected_pairs))
-                self.assertEqual(set(linked_pairs), expected_pairs)
-                page_pairs = []
-                for page in sorted(layer_dir.glob("review_[0-9][0-9][0-9].md")):
-                    page_pairs.extend(re.findall(r"^## pair-([0-9]+_[0-9]+)\s*$", page.read_text(encoding="utf-8"), re.M))
-                self.assertEqual(len(page_pairs), len(expected_pairs))
-                self.assertEqual(set(page_pairs), expected_pairs)
+                review = layer_dir / "review.html"
+                self.assertTrue(review.is_file())
+                parser = HTMLReviewParser()
+                parser.feed(review.read_text(encoding="utf-8"))
+                html_pairs = {anchor.removeprefix("pair-") for anchor in parser.ids if anchor.startswith("pair-")}
+                self.assertEqual(html_pairs, expected_pairs)
+                self.assertEqual(len(html_pairs), len(expected_pairs))
+                for href in parser.hrefs:
+                    if "#pair-" in href:
+                        self._assert_pair_link(href, review)
 
     def test_each_comment_shard_is_under_24_mb(self) -> None:
         for layer in ("A", "B"):

@@ -14,7 +14,7 @@ def esc(value) -> str:
     return html.escape(str(value))
 
 
-def build(layer_dir: Path, candidates_name: str, comments_name: str, out_name: str) -> None:
+def build(layer_dir: Path, candidates_name: str = "candidates.csv", comments_name: str = "comment_evidence_01.parquet", out_name: str = "review.html") -> None:
     candidates = pd.read_csv(layer_dir / candidates_name)
     comment_paths = sorted(layer_dir.glob("comment_evidence_*.parquet"))
     comments = pd.concat((pd.read_parquet(path) for path in comment_paths), ignore_index=True)
@@ -49,8 +49,8 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--root", type=Path, default=Path("."))
     args = p.parse_args()
-    build(args.root / "a_layer", "candidates.csv", "comment_evidence_01.parquet", "review.html")
-    build(args.root / "b_layer", "candidates.csv", "comment_evidence_01.parquet", "review.html")
+    build(args.root / "a_layer")
+    build(args.root / "b_layer")
 
 
 if __name__ == "__main__":

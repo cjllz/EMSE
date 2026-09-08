@@ -3,20 +3,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import html
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from make_review_html import build as build_review_html
+
 
 def safe_text(value):
     return "" if pd.isna(value) else str(value)
-
-
-def md(value):
-    return html.escape(safe_text(value)).replace("|", "&#124;").replace("\r", "").replace("\n", "<br>")
 
 
 def write_csv(frame, path):
@@ -27,15 +26,19 @@ def write_csv(frame, path):
 
 def prepare_layer(source, dest, layer):
     dest.mkdir(parents=True, exist_ok=True)
+    annotation_fields = ["same_intent", "different_accounts", "prior_awareness", "discussion_consensus", "label", "master_pr_id", "duplicate_pr_id", "evidence_notes", "reviewer_id", "reviewed_at_utc"]
     for name in ["reviewer_1.csv", "reviewer_2.csv", "adjudication.csv"]:
         existing = dest / name
-        if existing.exists() and pd.read_csv(existing).label.notna().any():
-            raise ValueError(f"Refusing to overwrite completed annotations: {existing}")
+        if existing.exists():
+            old = pd.read_csv(existing, dtype=str, keep_default_na=False)
+            present = [field for field in annotation_fields if field in old.columns]
+            if present and old[present].apply(lambda col: col.str.strip()).ne("").any().any():
+                raise ValueError(f"Refusing to overwrite completed annotations: {existing}")
     prefix = "duplicate" if layer == "A" else "broad_reference"
     candidates = pd.read_csv(source / f"{prefix}_candidates.csv")
     shutil.copyfile(source / f"{prefix}_candidates.csv", dest / "candidates.csv")
     if layer == "A":
-        for old, new in [("duplicate_msr_compatible_candidates.csv", "strict_candidates.csv"), ("duplicate_annotations_template.csv", "annotations_template.csv"), ("candidate_summary.json", "summary.json")]:
+        for old, new in [("duplicate_msr_compatible_candidates.csv", "strict_candidates.csv"), ("candidate_summary.json", "summary.json")]:
             shutil.copyfile(source / old, dest / new)
     else:
         for old, new in [("broad_reference_candidates_all.csv", "all_candidates.csv"), ("broad_reference_evidence.csv", "reference_evidence.csv"), ("broad_reference_summary.json", "summary.json")]:
@@ -58,34 +61,14 @@ def prepare_layer(source, dest, layer):
         comments.iloc[start:start + 5000].to_parquet(dest / name, index=False)
         assert (dest / name).stat().st_size < 24_000_000, "Reduce shard size"
         shards.append(name)
-    pages = []
-    index = [f"# {layer} 层人工核查索引", "", "所有标签为空。每对需要两位同学独立阅读，标准见 [人工标注指南](../ANNOTATION_GUIDE.md)。", "", "| 序号 | PR 对 | 仓库 | 同账号 | 提交前评论 | 快照引用 |", "| --- | --- | --- | --- | --- | --- |"]
     entries = []
-    for i, row in candidates.iterrows():
-        page = f"review_{i // 40 + 1:03}.md"
-        anchor = f"pair-{row.pair_id}"
-        evidence_page = f"https://github.com/cjllz/EMSE/blob/cjllz-rq1/{dest.name}/{page}#{anchor}"
-        if page not in pages:
-            pages.append(page)
-            (dest / page).write_text(f"# {layer} 层核查：第 {i // 40 + 1} 批\n\n[返回索引](REVIEW_INDEX.md) · [标注指南](../ANNOTATION_GUIDE.md)\n\n以下是候选线索，**不是人工结论**。摘录上限 4,000 字符，全文在本层评论 parquet 分片中；PR 链接显示的是当前 GitHub 状态。\n\n", encoding="utf-8")
-        pair_link = f"[{row.pair_id}]({page}#{anchor})"
-        repo = "/".join(str(row.html_url_a).split("/")[3:5])
-        index.append(f"| {i+1} | {pair_link} | {md(repo)} | {row.same_author} | {row.prior_comment_awareness} | {row.snapshot_reference_flag} |")
-        block = [f"## {anchor}", "", f"[{repo} PR #{row.pr_number_a}]({row.html_url_a}) 与 [PR #{row.pr_number_b}]({row.html_url_b})", "", f"- 标题 A：{md(row.title_a)}", f"- 标题 B：{md(row.title_b)}", f"- 作者：{md(row.author_a)} / {md(row.author_b)}", f"- 创建时间 UTC：{row.created_at_a} / {row.created_at_b}", f"- 风险标记：同账号={row.same_author}；提交前评论={row.prior_comment_awareness}；快照引用={row.snapshot_reference_flag}", ""]
-        for eid in dict.fromkeys(row.evidence_ids.split(";")):
-            e = by_evidence.loc[eid]
-            body = safe_text(e.body)
-            block += [f"### 证据 {eid}", "", f"类型：{e.comment_type}；来源 PR ID：{int(e.pr_id)}；时间：{e.created_at}；评论者：{md(e.user)}", "", "<pre>" + html.escape(body[:4000]) + "</pre>", ""]
-            if len(body) > 4000:
-                block += [f"（摘录，原文 {len(body):,} 字符。完整内容请按 evidence_id 在评论分片中读取。）", ""]
-        with (dest / page).open("a", encoding="utf-8") as fh:
-            fh.write("\n".join(block) + "\n")
-        entries.append({"pair_id": row.pair_id, "layer": layer, "pr_url_a": row.html_url_a, "pr_url_b": row.html_url_b, "evidence_page": evidence_page, "same_intent": "", "different_accounts": "", "prior_awareness": "", "discussion_consensus": "", "label": "", "master_pr_id": "", "duplicate_pr_id": "", "evidence_notes": "", "reviewer_id": "", "reviewed_at_utc": ""})
-    (dest / "REVIEW_INDEX.md").write_text("\n".join(index) + "\n", encoding="utf-8")
+    for _, row in candidates.iterrows():
+        entries.append({"pair_id": row.pair_id, "layer": layer, "pr_url_a": row.html_url_a, "pr_url_b": row.html_url_b, "evidence_page": f"review.html#pair-{row.pair_id}", "same_intent": "", "different_accounts": "", "prior_awareness": "", "discussion_consensus": "", "label": "", "master_pr_id": "", "duplicate_pr_id": "", "evidence_notes": "", "reviewer_id": "", "reviewed_at_utc": ""})
     template = pd.DataFrame(entries)
     for name in ["reviewer_1.csv", "reviewer_2.csv", "adjudication.csv"]:
         write_csv(template, dest / name)
-    stats = {"layer": layer, "candidate_pairs": len(candidates), "unique_prs": len(prs), "repositories": int(candidates.repo_id.nunique()), "discussion_rows": len(comments), "required_evidence_ids": len(needed), "missing_evidence_ids": 0, "comment_shards": shards, "review_pages": len(pages), "same_author_pairs": int(candidates.same_author.sum()), "prior_comment_awareness_pairs": int(candidates.prior_comment_awareness.sum()), "snapshot_reference_pairs": int(candidates.snapshot_reference_flag.sum()), "manual_labels_filled": 0}
+    build_review_html(dest)
+    stats = {"layer": layer, "candidate_pairs": len(candidates), "unique_prs": len(prs), "repositories": int(candidates.repo_id.nunique()), "discussion_rows": len(comments), "required_evidence_ids": len(needed), "missing_evidence_ids": 0, "comment_shards": shards, "review_pages": 1, "same_author_pairs": int(candidates.same_author.sum()), "prior_comment_awareness_pairs": int(candidates.prior_comment_awareness.sum()), "snapshot_reference_pairs": int(candidates.snapshot_reference_flag.sum()), "manual_labels_filled": 0}
     (dest / "review_summary.json").write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
     return stats
 
