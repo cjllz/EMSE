@@ -10,7 +10,7 @@
     "comment_shards": [
       "comment_evidence_01.parquet"
     ],
-    "review_pages": 4,
+    "review_pages": 1,
     "same_author_pairs": 0,
     "prior_comment_awareness_pairs": 0,
     "snapshot_reference_pairs": 37,
@@ -32,7 +32,7 @@
       "comment_evidence_05.parquet",
       "comment_evidence_06.parquet"
     ],
-    "review_pages": 38,
+    "review_pages": 1,
     "same_author_pairs": 1309,
     "prior_comment_awareness_pairs": 380,
     "snapshot_reference_pairs": 334,
