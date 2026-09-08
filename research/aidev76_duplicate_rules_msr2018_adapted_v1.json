@@ -1,0 +1,19 @@
+{
+  "rule_set": "aidev76_duplicate_rules_msr2018_adapted_v1",
+  "source": "https://github.com/Yuyue/MSR2018-DupPR/blob/master/code/rules.py",
+  "adaptation": "The three MSR2018 rules are ported to Python 3, use {0,5} rather than the legacy {,5} quantifier, match /pull/ and /pulls/ URL forms plus qualified owner/repo#number references, and retain the referenced PR number in capture group 1.",
+  "rules": [
+    {
+      "id": "MSR2018-R1",
+      "expression": "(?i)(?:clos(?:e|ed|ing)|dup(?:licated?)?|super(?:c|s)ee?ded?|obsoleted?|replaced?|redundant|better (?:implementation|solution)|solved|fixed|done|going|merged|addressed|already|land(?:ed|ing)) (?:\\w+ ){0,5}(?:by|in|with|as|of|in favor of|at|since|via):? (?:\\w+:? ){0,5}(?:(?:#|[\\w.\\-]+/[\\w.\\-]+#|https://github.com/(?:[\\w.\\-]+/)+pulls?/)(\\d+))"
+    },
+    {
+      "id": "MSR2018-R2",
+      "expression": "(?i)(?<![\\w/])(?:#|[\\w.\\-]+/[\\w.\\-]+#|https://github.com/(?:[\\w.\\-]+/)+pulls?/)(\\d+):? (?:\\w+:? ){0,5}(?:better (?:implementation|solution)|dup(?:licate)?|(?:fixe(?:d|s)|obsolete(?:d|s)|replace(?:d|s)))"
+    },
+    {
+      "id": "MSR2018-R3",
+      "expression": "(?i)dup(?:licated?)?:? (?:#|[\\w.\\-]+/[\\w.\\-]+#|https://github.com/(?:[\\w.\\-]+/)+pulls?/)(\\d+)"
+    }
+  ]
+}

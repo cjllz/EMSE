@@ -1,0 +1,161 @@
+{
+  "dataset": "hao-li/AIDev-7.6M",
+  "revision": "37bbe1533e26cc1e1374917dba1186d1c8a4dc81",
+  "generated_at_utc": "2026-09-08T14:54:28.385563+00:00",
+  "files": [
+    {
+      "path": "pull_request.parquet",
+      "exists": true,
+      "bytes": 362033413,
+      "expected_bytes": 362033413,
+      "sha256": "f31e6dc4a907db48ee8647626883ce188be5cb0da2acd0ce665b5f0a7d5d6f8f",
+      "expected_sha256": "f31e6dc4a907db48ee8647626883ce188be5cb0da2acd0ce665b5f0a7d5d6f8f",
+      "git_oid": "0e452fbecc3dc75af00c8b6166c8d604f6b0fedd",
+      "xet_hash": "3435736711db697eed3b04b5e15bb8a332462e880836793f5c0c1e930f6f01dc",
+      "verified": true,
+      "rows": 361296,
+      "columns": [
+        "id",
+        "number",
+        "title",
+        "body",
+        "agent",
+        "user_id",
+        "user",
+        "state",
+        "created_at",
+        "closed_at",
+        "merged_at",
+        "repo_id",
+        "repo_url",
+        "html_url"
+      ]
+    },
+    {
+      "path": "pr_comments.parquet",
+      "exists": true,
+      "bytes": 254277191,
+      "expected_bytes": 254277191,
+      "sha256": "610277c97b31c3f97d5b0cf9ce05c5c077610371b8d07353adfdb930d2646984",
+      "expected_sha256": "610277c97b31c3f97d5b0cf9ce05c5c077610371b8d07353adfdb930d2646984",
+      "git_oid": "ae41e3868a6a5b65bc25e1c09fbad85676731ea3",
+      "xet_hash": "75501d7339bafac640c7d6264de57a6bab78e118092b69be7323dcfffc0e23ce",
+      "verified": true,
+      "rows": 373549,
+      "columns": [
+        "id",
+        "pr_id",
+        "user",
+        "user_id",
+        "user_type",
+        "created_at",
+        "body"
+      ]
+    },
+    {
+      "path": "pr_reviews.parquet",
+      "exists": true,
+      "bytes": 74032534,
+      "expected_bytes": 74032534,
+      "sha256": "89104dd24c370464d0ff1c69d363253efd15ec0ee97d985e0da415018b4102c5",
+      "expected_sha256": "89104dd24c370464d0ff1c69d363253efd15ec0ee97d985e0da415018b4102c5",
+      "git_oid": "68b84d4d20448969f49a209cd8c5a130d7217ab1",
+      "xet_hash": "9d0b540d9ebb45f6fed1fa8b6180a56a8d08c0a9933752ff0d8c443a8423ded9",
+      "verified": true,
+      "rows": 281170,
+      "columns": [
+        "id",
+        "pr_id",
+        "pull_request_review_id",
+        "user",
+        "user_type",
+        "state",
+        "submitted_at",
+        "body"
+      ]
+    },
+    {
+      "path": "pr_review_comments.parquet",
+      "exists": true,
+      "bytes": 325912489,
+      "expected_bytes": 325912489,
+      "sha256": "aeef219f1362cbb8b53278a9b75d6890faf16929cf9686ecf74287f4da4d7e76",
+      "expected_sha256": "aeef219f1362cbb8b53278a9b75d6890faf16929cf9686ecf74287f4da4d7e76",
+      "git_oid": "f58b64c50a61fdf5b31296f633f0cfa4d7b6868c",
+      "xet_hash": "9718e78a49efbdbf73c9db2eba7e2bd55ddfa6aef64e1db228deef0c10e8155b",
+      "verified": true,
+      "rows": 289780,
+      "columns": [
+        "id",
+        "pull_request_review_id",
+        "user",
+        "user_type",
+        "diff_hunk",
+        "path",
+        "position",
+        "original_position",
+        "commit_id",
+        "original_commit_id",
+        "body",
+        "pull_request_url",
+        "created_at",
+        "updated_at",
+        "in_reply_to_id"
+      ]
+    },
+    {
+      "path": "related_issue.parquet",
+      "exists": true,
+      "bytes": 487652,
+      "expected_bytes": 487652,
+      "sha256": "f28fc40d4a99f6e564e5971402bbb12db6243f64b78c18453320b05018607dae",
+      "expected_sha256": "f28fc40d4a99f6e564e5971402bbb12db6243f64b78c18453320b05018607dae",
+      "git_oid": "11bca69ae2f7f9224588a57312daa9c11897256c",
+      "xet_hash": "01185bdd00ec1a8fcb072a354fbcc35e2a9efce495720f268835233e6baac29e",
+      "verified": true,
+      "rows": 38006,
+      "columns": [
+        "pr_id",
+        "issue_id",
+        "source"
+      ]
+    },
+    {
+      "path": "repository.parquet",
+      "exists": true,
+      "bytes": 1492325,
+      "expected_bytes": 1492325,
+      "sha256": "a8d1570ad5b2da017ac9f9cd5c38e8c1c23892ddf877854c89c7a7b9c3a84bee",
+      "expected_sha256": "a8d1570ad5b2da017ac9f9cd5c38e8c1c23892ddf877854c89c7a7b9c3a84bee",
+      "git_oid": "9a555192d8c866b4115c6b36a2f9db0683843a2c",
+      "xet_hash": "455c6f695b6bbbe481e3367f1d473bd310661be9c586123842b2e8b2dd712813",
+      "verified": true,
+      "rows": 25402,
+      "columns": [
+        "id",
+        "url",
+        "license",
+        "full_name",
+        "is_forked",
+        "language",
+        "forks",
+        "stars"
+      ]
+    },
+    {
+      "path": "README.md",
+      "exists": true,
+      "bytes": 15601,
+      "expected_bytes": 15601,
+      "sha256": "5a29918f777b3ac74a8fc895859982e938a31ee135998a6af8df3fa527707458",
+      "expected_sha256": null,
+      "git_oid": "b8ef7b8c0db6c35df649903f498c9c313c585e2b",
+      "xet_hash": null,
+      "verified": true,
+      "rows": null,
+      "columns": null
+    }
+  ],
+  "all_verified": true,
+  "failures": []
+}
