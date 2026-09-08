@@ -4,8 +4,8 @@
 
 我们用 AIDev v5 的 pop 子集，寻找“一个 PR 的讨论提到同仓库另一个 PR”的关系，再参考 MSR2018-DupPR 的三条规则筛选。这里一行代表一对 PR，不是一条 PR。结果只是待人工核查的候选，不是已经确认的重复关系。
 
-- **A 层**：932 对规则命中，保留 124 对主审核候选；其中 87 对是进一步排除快照引用后的严格子集（87 已包含在 124 内）。
-- **B 层**：7,297 对放宽规则后的扩展池，按检索信号排序后优先审核 1,500 对；与 A 完全不重复。优先 1,500 对中 1,309 对为同一 GitHub 账号，只有 191 对不同账号，因此 B 主要用于扩大召回，不是高置信结果。
+- **A 层**：先得到 2,948 行规则命中记录，合并成 932 对 PR，再保留 124 对主审核候选；其中 87 对是进一步排除快照引用后的严格子集（87 已包含在 124 内）。
+- **B 层**：从 15,343 条可解析引用出发，按 PR 对去重并排除 A 层后得到 7,297 对，再按检索信号排序后优先审核 1,500 对；与 A 完全不重复。优先 1,500 对中 1,309 对为同一 GitHub 账号，只有 191 对不同账号，因此 B 主要用于扩大召回，不是高置信结果。
 
 两层都必须由两位同学独立阅读、标注，再对分歧裁决，才能报告最终确认数量。
 
@@ -19,7 +19,7 @@
 
 候选 CSV 的主要字段：`pair_id`（PR 对编号）、`pr_id_a/pr_id_b`、`pr_number_a/pr_number_b`、`title_a/title_b`、`author_a/author_b`、`html_url_a/html_url_b`、创建时间、`earlier_pr_id/later_pr_id`、`evidence_ids`、`same_author`、`prior_comment_awareness`、`snapshot_reference_flag`。B 另有 `tier` 和 `retrieval_score`，只是排序信号。评论证据可按 `evidence_id` 在 `comment_evidence_*.parquet` 分片中回查；PR 信息在 `pr_evidence.parquet`。完整评论分片只为 A 的 124 对和 B 优先 1,500 对提供；B 全池 7,297 对只有候选表。
 
-导入 Excel 前建议把 ID、`pair_id`、URL 和日期列设为“文本”，避免科学计数法、前导数字丢失或公式触发。不要把 `same_author` 标记直接当作重复结论。
+导入 Excel 前建议把 ID、`pair_id`、URL 和日期列设为“文本”，避免科学计数法、前导数字丢失或公式触发。不要把 `same_author` 标记直接当作重复结论。全 pop 的 944,499 行讨论是输入总量，不等于发布包中 A 的 1,261 行、B 的 28,054 行候选证据。
 
 ## 复现
 
@@ -34,4 +34,4 @@ python code/prepare_rq1_release.py --a-source results/aidev76_duppr --b-source r
 python code/test_rq1_release.py
 ```
 
-`code/` 中包含下载、A 层构建、B 层构建、发布整理和测试脚本。论文规则来源：[MSR2018-DupPR code](https://github.com/Yuyue/MSR2018-DupPR/tree/master/code)。本发布包不含原始 AIDev parquet；需先下载并校验 pop 数据。
+`code/` 中包含下载、A 层构建、B 层构建、发布整理和测试脚本。论文规则来源：[MSR2018-DupPR code](https://github.com/Yuyue/MSR2018-DupPR/tree/master/code)。本发布包不含原始 AIDev parquet；需先下载并校验 pop 数据。仓库中可直接打开的入口是两层各自的 `review.html`；早期分页 Markdown 文件仅为历史导出，不参与当前标注流程。
