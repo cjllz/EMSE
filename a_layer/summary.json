@@ -1,0 +1,18 @@
+{
+  "dataset": "hao-li/AIDev-7.6M",
+  "revision": "37bbe1533e26cc1e1374917dba1186d1c8a4dc81",
+  "input_prs": 361296,
+  "input_discussion_rows": 944499,
+  "seed_sample_rows": 1994,
+  "candidate_pairs_all": 932,
+  "retained_candidate_pairs": 124,
+  "prefilter_excluded_pairs": 845,
+  "msr_compatible_pairs": 87,
+  "rule_set": "aidev76_duplicate_rules_msr2018_adapted_v1",
+  "rule_matches": 2948,
+  "unmapped_inline_review_comments": 0,
+  "inline_review_id_fallbacks": 0,
+  "resolved_rule_hits": 1093,
+  "rejected_rule_hits": 1855,
+  "interpretation": "Candidates and evidence only; no duplicate label inferred."
+}
