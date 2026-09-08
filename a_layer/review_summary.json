@@ -1,0 +1,17 @@
+{
+  "layer": "A",
+  "candidate_pairs": 124,
+  "unique_prs": 239,
+  "repositories": 63,
+  "discussion_rows": 1261,
+  "required_evidence_ids": 133,
+  "missing_evidence_ids": 0,
+  "comment_shards": [
+    "comment_evidence_01.parquet"
+  ],
+  "review_pages": 4,
+  "same_author_pairs": 0,
+  "prior_comment_awareness_pairs": 0,
+  "snapshot_reference_pairs": 37,
+  "manual_labels_filled": 0
+}
