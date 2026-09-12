@@ -4,7 +4,7 @@
 
 
 
-[rules.py]从 AIDev popv5数据中筛选出 899 对可能有关联的 PR。
+code/rules.py从 AIDev popv5数据中筛选出 899 对可能有关联的 PR。
 
 筛选规则如下：
 
