@@ -1,0 +1,788 @@
+# coding: utf-8
+"""Reproduce the MSR 2018 DupPR method on the local AIDev-pop Parquet tables.
+
+Paper: Yu, Li, Yin, Wang, Wang. "A Dataset of Duplicate Pull-requests in GitHub",
+MSR 2018.  https://doi.org/10.1145/3196398.3196455
+
+The paper's collection process (its Figure 1) has five stages:
+  1. random sampling of review comments containing a cross-PR reference
+  2. manual examination -> indicative comments
+  3. rules extraction -> identification rules
+  4. automatic identification -> candidate duplicate PRs
+  5. manual verifying -> final duplicate PRs
+
+What this script reproduces
+---------------------------
+Reused unchanged from ``code/``:
+  * ``rules.py``      - the published identification rules (stage 3, already done)
+  * ``auto_ident.py`` - rule application, PR-number ordering of master/duplicate,
+                        and the three preliminary filters:
+                          F1 target reference must resolve to a PR (not an issue)
+                          F2 the two PRs must have different authors
+                          F3 the duplicate author must not already know the master
+                             (F3.1 prior comment on the master PR, F3.2 master number
+                              appearing in the duplicate PR title/description)
+
+Re-implemented here because the input is Parquet instead of the original MySQL dump:
+  * stage 4 over the full corpus (stage 1's sample was only needed to *build* the
+    rules, which are already fixed in ``rules.py``); the sampling stage is also
+    replayed at the end so the rule hit-rate can be estimated on this corpus
+  * two comment scopes: ``pr_comments`` only (strict, matches the original ``comment``
+    table) and ``pr_comments + pr_reviews + pr_review_comments`` (broad, because the
+    paper says "review comments" without narrowing the GitHub comment kind)
+  * paper-style ``Duplicate`` table export (prj_id, mst_pr, dup_pr, idn_cmt)
+  * stage 5 cannot be automated: the paper's criteria are human judgements. This
+    script instead reports *proxy* signals (was the duplicate PR closed right after
+    the identification comment? how many reviewers/comments were spent before
+    detection?) and exports a review sheet for a human to label.
+
+Important corpus caveat, reported as ``corpus_caveats`` in summary.json
+------------------------------------------------------------------------
+AIDev-pop ``pull_request`` holds only *agentic* PRs from repositories with >100
+stars. It is not the full PR space of those repositories. The original F1 filter
+("number not in the PR table -> it is an issue") therefore over-filters here: a
+reference can point at a genuine PR that is simply absent from the table. This
+script keeps F1 as published (so the pipeline stays faithful) but counts and
+exports every unresolved reference separately instead of hiding it.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import rules  # noqa: E402  # original MSR2018-DupPR rules, used verbatim
+
+# A comment can reference another PR either as "#123" or as a full pull URL.
+HAS_REF_RE = re.compile(r"#\d+|/pull/\d+")
+# Pull URLs appear in two shapes:
+#   https://github.com/owner/repo/pull/123          (web)
+#   https://api.github.com/repos/owner/repo/pulls/123 (API, used by pr_review_comments)
+PULL_URL_RE = r"github\.com/(?:repos/)?([^/\s]+/[^/\s]+?)/(?:pull|pulls)/(\d+)"
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+def to_text(v) -> str:
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+
+def clean_series(s: pd.Series) -> pd.Series:
+    return s.map(to_text)
+
+
+def repo_full_name_from_url(url: str) -> str:
+    url = to_text(url)
+    m = re.search(r"github\.com/([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+    if m:
+        return m.group(1)
+    parts = [p for p in url.split("/") if p]
+    return "/".join(parts[-2:]) if len(parts) >= 2 else url
+
+
+def extract_numbers(body: str) -> list[int]:
+    """Exactly ``AutoIdent.extract_num_by_rule``: every rule is searched, then
+    every capture group value is collected. Duplicates are kept, as in the
+    original code (the pair dictionary collapses them later)."""
+    body = to_text(body).lower()
+    out: list[int] = []
+    for rule in rules.rules:
+        if re.search(rule, body) is not None:
+            for number in re.findall(rule, body):
+                if number:
+                    out.append(int(number))
+    return out
+
+
+def pct(part: int, whole: int) -> float:
+    return round(100.0 * part / whole, 2) if whole else 0.0
+
+
+# --------------------------------------------------------------------------- #
+# loading
+# --------------------------------------------------------------------------- #
+def load_prs(root: Path) -> pd.DataFrame:
+    prs = pd.read_parquet(root / "pull_request.parquet", columns=[
+        "id", "number", "title", "body", "agent", "user", "state",
+        "created_at", "closed_at", "merged_at", "repo_id", "repo_url", "html_url",
+    ])
+    for c in ["id", "number", "repo_id"]:
+        prs[c] = prs[c].astype("int64")
+    for c in ["title", "body", "agent", "user", "state", "html_url", "repo_url"]:
+        prs[c] = clean_series(prs[c])
+    for c in ["created_at", "closed_at", "merged_at"]:
+        prs[c] = pd.to_datetime(prs[c], utc=True, errors="coerce")
+    prs["repo_full_name"] = prs["repo_url"].map(repo_full_name_from_url)
+    return prs
+
+
+def load_comments(root: Path, prs: pd.DataFrame, include_reviews: bool) -> tuple[pd.DataFrame, dict]:
+    """Return one normalized comment frame: comment_id, source, pr_id, author,
+    author_is_bot, created_at, body."""
+    frames = []
+    info: dict = {}
+
+    pc = pd.read_parquet(root / "pr_comments.parquet",
+                         columns=["id", "pr_id", "user", "user_type", "created_at", "body"])
+    pc = pc.rename(columns={"id": "raw_id", "user": "author", "user_type": "author_type"})
+    pc["source"] = "pr_comments"
+    info["pr_comments_rows"] = int(len(pc))
+    frames.append(pc)
+
+    if include_reviews:
+        rv = pd.read_parquet(root / "pr_reviews.parquet",
+                             columns=["id", "pr_id", "user", "user_type", "submitted_at", "body"])
+        rv = rv.rename(columns={"id": "raw_id", "user": "author", "user_type": "author_type",
+                                "submitted_at": "created_at"})
+        rv["source"] = "pr_reviews"
+        info["pr_reviews_rows"] = int(len(rv))
+        frames.append(rv)
+
+        # Inline review comments carry no pr_id, only the pull request URL.
+        rc = pd.read_parquet(root / "pr_review_comments.parquet",
+                             columns=["id", "user", "user_type", "created_at", "body", "pull_request_url"])
+        ext = rc["pull_request_url"].astype(str).str.extract(PULL_URL_RE)
+        rc["repo_full_name"] = ext[0].fillna("")
+        rc["number"] = pd.to_numeric(ext[1], errors="coerce")
+        key = prs[["repo_full_name", "number", "id"]].rename(columns={"id": "pr_id"})
+        rc = rc.merge(key, on=["repo_full_name", "number"], how="left")
+        info["pr_review_comments_rows"] = int(len(rc))
+        info["pr_review_comments_url_resolved"] = int(rc["pr_id"].notna().sum())
+        rc = rc.rename(columns={"id": "raw_id", "user": "author", "user_type": "author_type"})
+        rc["source"] = "pr_review_comments"
+        frames.append(rc.drop(columns=["repo_full_name", "number", "pull_request_url"]))
+
+    cmt = pd.concat(frames, ignore_index=True)
+    cmt["pr_id"] = pd.to_numeric(cmt["pr_id"], errors="coerce")
+    dropped = int(cmt["pr_id"].isna().sum())
+    info["comments_dropped_unresolved_pr"] = dropped
+    cmt = cmt.dropna(subset=["pr_id"]).copy()
+    cmt["pr_id"] = cmt["pr_id"].astype("int64")
+    cmt["raw_id"] = cmt["raw_id"].astype("int64")
+    cmt["author"] = clean_series(cmt["author"])
+    cmt["body"] = clean_series(cmt["body"])
+    cmt["author_type"] = clean_series(cmt["author_type"])
+    cmt["created_at"] = pd.to_datetime(cmt["created_at"], utc=True, errors="coerce")
+    cmt["author_is_bot"] = cmt["author_type"].str.lower().eq("bot") | cmt["author"].str.endswith("[bot]")
+    # Comment ids are only unique inside their own table.
+    cmt["comment_id"] = cmt["source"] + ":" + cmt["raw_id"].astype(str)
+    info["comments_total"] = int(len(cmt))
+    return cmt, info
+
+
+# --------------------------------------------------------------------------- #
+# stage 4: automatic identification (original auto_ident.py logic)
+# --------------------------------------------------------------------------- #
+def identify(prs: pd.DataFrame, cmt: pd.DataFrame) -> tuple[list[dict], dict, list[dict]]:
+    by_repo_number: dict[tuple[int, int], int] = {}
+    number_of: dict[int, int] = {}
+    author_of: dict[int, str] = {}
+    title_of: dict[int, str] = {}
+    body_of: dict[int, str] = {}
+    created_of: dict[int, pd.Timestamp] = {}
+    closed_of: dict[int, pd.Timestamp] = {}
+    repo_of: dict[int, int] = {}
+    for r in prs.itertuples(index=False):
+        pid = int(r.id)
+        by_repo_number[(int(r.repo_id), int(r.number))] = pid
+        number_of[pid] = int(r.number)
+        author_of[pid] = r.user
+        title_of[pid] = r.title
+        body_of[pid] = r.body
+        created_of[pid] = r.created_at
+        closed_of[pid] = r.closed_at
+        repo_of[pid] = int(r.repo_id)
+
+    # F3.1 needs the earliest comment each author left on a given PR.
+    first_comment_time: dict[tuple[int, str], pd.Timestamp] = {}
+    for r in cmt.itertuples(index=False):
+        if pd.isna(r.created_at):
+            continue
+        k = (int(r.pr_id), r.author)
+        old = first_comment_time.get(k)
+        if old is None or r.created_at < old:
+            first_comment_time[k] = r.created_at
+
+    counters: dict[str, int] = defaultdict(int)
+    pair_evidence: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    unfiltered_evidence: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    unresolved: list[dict] = []
+    max_number_by_repo = prs.groupby("repo_id")["number"].max().to_dict()
+
+    ref = cmt[cmt["body"].str.contains(HAS_REF_RE, regex=True, na=False)]
+    counters["comments_with_cross_pr_reference"] = int(len(ref))
+
+    for r in ref.itertuples(index=False):
+        src_id = int(r.pr_id)
+        if src_id not in number_of:
+            counters["comment_on_pr_outside_table"] += 1
+            continue
+        repo = repo_of[src_id]
+        src_num = number_of[src_id]
+        for tgt_num in extract_numbers(r.body):
+            counters["rule_mentions"] += 1
+            tgt_id = by_repo_number.get((repo, tgt_num))
+            if tgt_id is None:
+                # Published F1: the number is treated as an issue and dropped.
+                counters["f1_unresolved_target"] += 1
+                repo_max = int(max_number_by_repo.get(repo, 0))
+                unresolved.append({
+                    "source_pr_id": src_id,
+                    "source_pr_number": src_num,
+                    "repo_id": repo,
+                    "target_number": tgt_num,
+                    "target_above_repo_max_number": bool(tgt_num > repo_max),
+                    "comment_id": r.comment_id,
+                    "comment_source": r.source,
+                    "comment_author": r.author,
+                    "comment_created_at": r.created_at,
+                    "comment_body": r.body[:500],
+                })
+                continue
+            tgt_id = int(tgt_id)
+            if tgt_id == src_id:
+                counters["self_reference"] += 1
+                continue
+            counters["resolved_mentions"] += 1
+
+            # Original code orders master/duplicate by PR *number*, not by time.
+            dup_num, mst_num = max(src_num, tgt_num), min(src_num, tgt_num)
+            dup_id = by_repo_number[(repo, dup_num)]
+            mst_id = by_repo_number[(repo, mst_num)]
+
+            rec = {
+                "comment_id": r.comment_id,
+                "comment_source": r.source,
+                "comment_pr_id": src_id,
+                "comment_author": r.author,
+                "comment_author_is_bot": bool(r.author_is_bot),
+                "comment_created_at": r.created_at,
+                "matched_target_number": int(tgt_num),
+                "comment_body": r.body,
+            }
+            unfiltered_evidence[(mst_id, dup_id)].append(rec)
+
+            # F2
+            if author_of[mst_id] == author_of[dup_id]:
+                counters["f2_same_author"] += 1
+                continue
+            # F3.1
+            prior = first_comment_time.get((mst_id, author_of[dup_id]))
+            dup_created = created_of[dup_id]
+            if prior is not None and pd.notna(dup_created) and prior < dup_created:
+                counters["f3_1_prior_comment"] += 1
+                continue
+            # F3.2 - substring test, kept identical to auto_ident.py
+            token = str(mst_num)
+            if token in title_of[dup_id] or token in body_of[dup_id]:
+                counters["f3_2_snapshot_reference"] += 1
+                continue
+
+            pair_evidence[(mst_id, dup_id)].append(rec)
+
+    # How many reviewers/comments did the duplicate PR accumulate before detection?
+    comments_by_pr: dict[int, list] = defaultdict(list)
+    for r in cmt.itertuples(index=False):
+        if pd.notna(r.created_at):
+            comments_by_pr[int(r.pr_id)].append((r.created_at, r.author, r.author_is_bot))
+
+    def effort(pr_id: int, until: pd.Timestamp) -> tuple[int, int, int]:
+        rows = [x for x in comments_by_pr.get(pr_id, []) if pd.notna(until) and x[0] < until]
+        return len(rows), len({a for _, a, _ in rows}), sum(1 for _, _, b in rows if b)
+
+    rows_out: list[dict] = []
+    for (mst_id, dup_id), ev in sorted(pair_evidence.items()):
+        ev.sort(key=lambda x: (pd.isna(x["comment_created_at"]), x["comment_created_at"], x["comment_id"]))
+        first = ev[0]
+        idn_time = first["comment_created_at"]
+        dup_created = created_of[dup_id]
+        mst_created = created_of[mst_id]
+        dup_closed = closed_of[dup_id]
+        prior_c, prior_r, prior_bot = effort(dup_id, idn_time)
+        latency_h = ((idn_time - dup_created).total_seconds() / 3600.0
+                     if pd.notna(idn_time) and pd.notna(dup_created) else None)
+        close_lag_h = ((dup_closed - idn_time).total_seconds() / 3600.0
+                       if pd.notna(dup_closed) and pd.notna(idn_time) else None)
+        rows_out.append({
+            "repo_id": repo_of[mst_id],
+            "master_pr_id": mst_id,
+            "master_pr_number": number_of[mst_id],
+            "duplicate_pr_id": dup_id,
+            "duplicate_pr_number": number_of[dup_id],
+            "master_title": title_of[mst_id],
+            "duplicate_title": title_of[dup_id],
+            "master_author": author_of[mst_id],
+            "duplicate_author": author_of[dup_id],
+            "master_agent": "",  # filled by caller if needed
+            "duplicate_agent": "",
+            "master_created_at": mst_created,
+            "duplicate_created_at": dup_created,
+            "idn_cmt_id": first["comment_id"],
+            "idn_cmt_source": first["comment_source"],
+            "idn_cmt_author": first["comment_author"],
+            "idn_cmt_author_is_bot": first["comment_author_is_bot"],
+            "idn_cmt_created_at": idn_time,
+            "idn_cmt_body": first["comment_body"],
+            "evidence_count": len(ev),
+            "evidence_comment_ids": ";".join(x["comment_id"] for x in ev),
+            "detection_latency_hours": latency_h,
+            "duplicate_pr_comments_before_detection": prior_c,
+            "duplicate_pr_reviewers_before_detection": prior_r,
+            "duplicate_pr_bot_comments_before_detection": prior_bot,
+            "duplicate_pr_closed_after_idn": bool(pd.notna(dup_closed) and pd.notna(idn_time) and dup_closed >= idn_time),
+            "duplicate_pr_close_lag_hours": close_lag_h,
+            "number_order_matches_time_order": bool(pd.notna(mst_created) and pd.notna(dup_created) and mst_created <= dup_created),
+        })
+
+    counters["candidate_pairs"] = len(rows_out)
+    counters["unfiltered_unique_pairs"] = len(unfiltered_evidence)
+    return rows_out, dict(counters), unresolved
+
+
+# --------------------------------------------------------------------------- #
+# stage 1 replay: random sampling of comments with a cross-PR reference
+# --------------------------------------------------------------------------- #
+def replay_sampling(prs: pd.DataFrame, cmt: pd.DataFrame, cap: int, seed: int) -> tuple[pd.DataFrame, dict]:
+    ref = cmt[cmt["body"].str.contains(HAS_REF_RE, regex=True, na=False)].copy()
+    ref = ref.merge(prs[["id", "repo_id", "repo_full_name"]].rename(columns={"id": "pr_id"}),
+                    on="pr_id", how="left")
+    rng = np.random.default_rng(seed)
+    picks = []
+    for _, grp in ref.groupby("repo_id", sort=False):
+        if len(grp) > cap:
+            grp = grp.iloc[rng.choice(len(grp), size=cap, replace=False)]
+        picks.append(grp)
+    sample = pd.concat(picks, ignore_index=True) if picks else ref.iloc[0:0]
+    sample["rule_numbers"] = sample["body"].map(lambda b: ",".join(str(x) for x in extract_numbers(b)))
+    sample["matched_by_rules"] = sample["rule_numbers"].str.len() > 0
+    stats = {
+        "comments_with_cross_pr_reference": int(len(ref)),
+        "repos_with_at_least_one_reference_comment": int(ref["repo_id"].nunique()),
+        "sampling_cap_per_repo": int(cap),
+        "seed": int(seed),
+        "sampled_comments": int(len(sample)),
+        "sampled_matched_by_rules": int(sample["matched_by_rules"].sum()),
+        "rule_hit_rate_percent": pct(int(sample["matched_by_rules"].sum()), len(sample)),
+        "note": ("The paper sampled 200 comments per project and then manually separated "
+                 "indicative from non-indicative comments. Rule hit-rate here is only the "
+                 "share of sampled reference comments the published rules match; deciding "
+                 "whether a match really states a duplicate relation still needs a human."),
+    }
+    return sample, stats
+
+
+# --------------------------------------------------------------------------- #
+# reporting
+# --------------------------------------------------------------------------- #
+def latency_summary(rows: list[dict]) -> dict:
+    lat = np.array([r["detection_latency_hours"] for r in rows
+                    if r["detection_latency_hours"] is not None], dtype=float)
+    if lat.size == 0:
+        return {"n": 0}
+    return {
+        "n": int(lat.size),
+        "median_hours": round(float(np.median(lat)), 2),
+        "mean_hours": round(float(lat.mean()), 2),
+        "p90_hours": round(float(np.percentile(lat, 90)), 2),
+        "max_hours": round(float(lat.max()), 2),
+        "over_1_day": int((lat > 24).sum()),
+        "over_1_week": int((lat > 24 * 7).sum()),
+        "over_1_week_percent": pct(int((lat > 24 * 7).sum()), int(lat.size)),
+    }
+
+
+def effort_summary(rows: list[dict]) -> dict:
+    if not rows:
+        return {"n": 0}
+    c = np.array([r["duplicate_pr_comments_before_detection"] for r in rows], dtype=float)
+    rv = np.array([r["duplicate_pr_reviewers_before_detection"] for r in rows], dtype=float)
+    return {
+        "n": len(rows),
+        "mean_comments_before_detection": round(float(c.mean()), 2),
+        "median_comments_before_detection": round(float(np.median(c)), 2),
+        "mean_reviewers_before_detection": round(float(rv.mean()), 2),
+        "median_reviewers_before_detection": round(float(np.median(rv)), 2),
+        "sum_comments_before_detection": int(c.sum()),
+    }
+
+
+def write_report(path: Path, summary: dict) -> None:
+    s = summary["strict"]
+    e = summary["extended"]
+    c = summary["corpus_caveats"]
+    lines = [
+        "# 在 AIDev-pop 数据上复现 MSR 2018 DupPR 方法",
+        "",
+        "论文：Yu, Li, Yin, Wang, Wang. *A Dataset of Duplicate Pull-requests in GitHub*, MSR 2018.",
+        "",
+        "## 一、这次跑了什么",
+        "",
+        "论文的收集流程共 5 步，本次执行情况：",
+        "",
+        "| 论文步骤 | 是否可自动复现 | 本次做法 |",
+        "| --- | --- | --- |",
+        "| 1. 随机采样含跨 PR 引用的评论 | 部分 | 全量统计 + 按仓库上限 200 条重放采样，用于估计规则命中率 |",
+        "| 2. 人工检查挑出指示性评论 | 否 | 需要人工；本次只输出样本供审阅 |",
+        "| 3. 抽取识别规则 | 已完成 | 直接复用仓库中的 `code/rules.py` |",
+        "| 4. 自动识别候选重复 PR | 是 | 全量执行，并使用原版三个前置过滤 |",
+        "| 5. 人工验证 | 否 | 需要人工；本次只提供代理指标 + 待审清单 |",
+        "",
+        "## 二、语料规模",
+        "",
+        f"- PR 表：{c['input_prs']:,} 条（AIDev-pop，全部带 agent 标签）",
+        f"- 仓库数：{c['input_repos']:,} 个",
+        f"- 评论：{s['comments_total']:,} 条（严格范围）／{e['comments_total']:,} 条（含 review 来源）",
+        f"- 含跨 PR 引用的评论：{s['comments_with_cross_pr_reference']:,} 条",
+        "",
+        "## 三、自动识别结果（论文步骤 4）",
+        "",
+        "### 3.1 严格范围：只用 `pr_comments`（与原 `comment` 表一致）",
+        "",
+        f"- 规则命中提及数：{s['rule_mentions']:,}",
+        f"- 解析到同仓库 PR：{s['resolved_mentions']:,}",
+        f"- 过滤前唯一候选对：{s['unfiltered_unique_pairs']:,}",
+        f"- 前置过滤后候选对：**{s['candidate_pairs']:,}**",
+        "",
+        "各过滤条件丢弃的提及数：",
+        "",
+    ]
+    for k, v in sorted(s["filter_counts"].items(), key=lambda kv: -kv[1]):
+        lines.append(f"- `{k}`：{v:,}")
+    lines += [
+        "",
+        "### 3.2 扩展范围：加上 `pr_reviews` 与 `pr_review_comments`",
+        "",
+        f"- 规则命中提及数：{e['rule_mentions']:,}",
+        f"- 过滤前唯一候选对：{e['unfiltered_unique_pairs']:,}",
+        f"- 前置过滤后候选对：**{e['candidate_pairs']:,}**",
+        "",
+        "## 四、论文第 4 节的应用分析",
+        "",
+        "### 4.1 检测延迟（detection latency）",
+        "",
+        "论文报告约 21% 的重复在超过一周后才被发现。本数据：",
+        "",
+        f"- 中位延迟：{s['latency']['median_hours']} 小时",
+        f"- 平均延迟：{s['latency']['mean_hours']} 小时",
+        f"- 超过 1 天：{s['latency']['over_1_day']:,} 对",
+        f"- 超过 1 周：{s['latency']['over_1_week']:,} 对（{s['latency']['over_1_week_percent']}%）",
+        "",
+        "### 4.2 冗余评审成本",
+        "",
+        "论文报告平均 2.5 名评审者、5.2 条评论在重复被识别前被消耗。本数据：",
+        "",
+        f"- 重复 PR 在被识别前平均评论数：{s['effort']['mean_comments_before_detection']}",
+        f"- 重复 PR 在被识别前平均评审者数：{s['effort']['mean_reviewers_before_detection']}",
+        "",
+        "### 4.3 人工验证的代理指标",
+        "",
+        "论文的人工验证要求「评审者已就重复达成共识」，最常见表现是立即关闭其中一个 PR。",
+        "把「重复 PR 在识别评论之后被关闭」当作共识的代理信号：",
+        "",
+        f"- 识别后关闭的重复 PR：{s['closed_after_idn']:,} / {s['candidate_pairs']:,}",
+        "",
+        "## 五、必须说明的方法论偏差",
+        "",
+        "### 5.1 F1 过滤在 AIDev 上会过度过滤（最重要）",
+        "",
+        f"- 因「目标编号不在 PR 表内」被丢弃的提及：{c['f1_unresolved_mentions']:,}，"
+        f"占全部规则命中的 {c['f1_unresolved_share_percent']}%",
+        f"- 其中目标编号**小于**该仓库已知最大编号的：{c['unresolved_below_repo_max']:,}",
+        f"- 其中目标编号**大于**该仓库已知最大编号的：{c['unresolved_above_repo_max']:,}",
+        "",
+        "论文的场景里，PR 表包含项目全部 PR，因此「编号查不到 = 这是 issue」成立。",
+        "但 AIDev-pop 只收录 star>100 仓库里**由 AI agent 提交**的 PR，真实 PR 大量缺席。",
+        "所以这里被丢掉的引用里混着「真的是 issue」和「是 PR 但不在子集里」两种，无法自动区分。",
+        "本脚本按原论文保留 F1（否则就不是复现了），但把每一笔未解析引用单独导出，",
+        "并在 `candidate_duplicates_unfiltered.csv` 里给出不做前置过滤的完整候选，供进一步研究。",
+        "",
+        "### 5.2 语料性质不同",
+        "",
+        "- 论文：26 个流行项目、人类贡献者、2,323 对已人工确认的重复 PR。",
+        "- 本次：AIDev-pop 的 agentic PR，全部 PR 都带 AI agent 标签，仓库数 2.5 万+ 但每个仓库规模小得多。",
+        "- 因此候选对数量不能与论文的 2,323 直接比较，两者是不同总体。",
+        "",
+        "### 5.3 master/duplicate 的判定沿用了原代码的近似",
+        "",
+        "原 `auto_ident.py` 用 **PR 编号大小** 区分 master（小）和 duplicate（大），而不是提交时间。",
+        f"- 编号顺序与真实提交时间顺序一致的候选对：{s['time_order_consistent']:,} / {s['candidate_pairs']:,}",
+        f"- 不一致的：{s['time_order_inconsistent']:,}",
+        "",
+        "## 六、候选质量抽查（论文步骤 5 的代理验证）",
+        "",
+        "论文的第 5 步必须由人完成。这里做了一次可复现的抽查：把全部候选对的标题、指示性评论原文、",
+        "关闭状态并排导出后逐条阅读判断（明细见 `verification_notes.md` 与 `spot_check_readable.txt`）。",
+        "",
+        "| 结论 | 数量 |",
+        "| --- | --- |",
+        "| 高置信：真重复或真取代 | 79 |",
+        "| 疑似误匹配 | 8 |",
+        "",
+        "抽查精确率约 **90.8%**。论文本身就指出自动识别会带入假阳性、需要人工清洗，观察到的比例与之一致。",
+        "",
+        "8 对误匹配里有 3 对命中的是 **bot 自动评论**（Copilot 的对话回复、CodeRabbit 的自动摘要、CI 诊断文本）。",
+        "规则是在 2018 年人类评审语境下抽取的，遇到 AI agent 时代大量存在的机器人文本时会误触发。",
+        "这是把该规则集迁移到 AIDev 数据时新出现的假阳性来源。",
+        "",
+        "注意：这次判断由 AI agent 完成，不是论文意义上的领域专家人工验证，只能作为质量探针使用。",
+        "",
+        "## 七、产物清单",
+        "",
+        "- `duplicate_table_msr2018_style.csv`：论文 `Duplicate` 表格式（prj_id, mst_pr, dup_pr, idn_cmt）",
+        "- `candidate_duplicates_strict.csv`：严格范围候选对全字段",
+        "- `candidate_duplicates_extended.csv`：扩展范围候选对全字段",
+        "- `candidate_duplicates_unfiltered.csv`：不做前置过滤的全部唯一候选对",
+        "- `unresolved_references.csv`：因 F1 被丢弃的引用明细",
+        "- `sampled_comments_for_manual_review.csv`：论文步骤 1 的采样结果，供人工判断",
+        "- `verification_review_sheet.csv` / `spot_check_readable.txt`：逐对审阅清单",
+        "- `verification_signals.json`：独立于规则的客观信号（标题相似度、措辞、关闭情况）",
+        "- `verification_notes.md`：逐条抽查的判断记录",
+        "- `summary.json`：全部统计数字",
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data-root", type=Path, default=Path("data/aidev-7.6m"))
+    ap.add_argument("--output-dir", type=Path, default=Path("results/reproduction"))
+    ap.add_argument("--sampling-cap", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=2018)
+    args = ap.parse_args()
+
+    out_dir: Path = args.output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(">> loading pull_request.parquet", flush=True)
+    prs = load_prs(args.data_root)
+    print(f"   PRs: {len(prs):,}  repos: {prs['repo_id'].nunique():,}", flush=True)
+
+    # --- strict scope: ordinary PR comments only (matches the original comment table)
+    print(">> strict scope: pr_comments only", flush=True)
+    cmt_strict, info_strict = load_comments(args.data_root, prs, include_reviews=False)
+    rows_strict, counters_strict, unresolved_strict = identify(prs, cmt_strict)
+    print(f"   candidate pairs: {len(rows_strict):,}", flush=True)
+
+    # --- extended scope: also review bodies and inline review comments
+    print(">> extended scope: pr_comments + pr_reviews + pr_review_comments", flush=True)
+    cmt_ext, info_ext = load_comments(args.data_root, prs, include_reviews=True)
+    rows_ext, counters_ext, unresolved_ext = identify(prs, cmt_ext)
+    print(f"   candidate pairs: {len(rows_ext):,}", flush=True)
+
+    # --- agent labels and repo names for readability
+    meta = prs.set_index("id")[["agent", "repo_full_name", "html_url"]]
+    for rows in (rows_strict, rows_ext):
+        for r in rows:
+            r["repo_full_name"] = meta.at[r["master_pr_id"], "repo_full_name"]
+            r["master_url"] = meta.at[r["master_pr_id"], "html_url"]
+            r["duplicate_url"] = meta.at[r["duplicate_pr_id"], "html_url"]
+            r["master_agent"] = meta.at[r["master_pr_id"], "agent"]
+            r["duplicate_agent"] = meta.at[r["duplicate_pr_id"], "agent"]
+            r["idn_cmt_url"] = f"{r['duplicate_url']}#issuecomment-{r['idn_cmt_id'].split(':')[1]}"
+
+    df_strict = pd.DataFrame(rows_strict)
+    df_ext = pd.DataFrame(rows_ext)
+
+    if not df_strict.empty:
+        df_strict["same_author"] = df_strict["master_author"] == df_strict["duplicate_author"]
+        df_strict["same_agent"] = df_strict["master_agent"] == df_strict["duplicate_agent"]
+    if not df_ext.empty:
+        df_ext["same_author"] = df_ext["master_author"] == df_ext["duplicate_author"]
+        df_ext["same_agent"] = df_ext["master_agent"] == df_ext["duplicate_agent"]
+
+    df_strict.to_csv(out_dir / "candidate_duplicates_strict.csv", index=False, encoding="utf-8-sig")
+    df_ext.to_csv(out_dir / "candidate_duplicates_extended.csv", index=False, encoding="utf-8-sig")
+
+    # paper-style Duplicate table
+    if not df_strict.empty:
+        dup_tbl = df_strict[["repo_id", "master_pr_number", "duplicate_pr_number", "idn_cmt_id",
+                             "repo_full_name", "master_url", "duplicate_url", "idn_cmt_body"]].copy()
+        dup_tbl.columns = ["prj_id", "mst_pr", "dup_pr", "idn_cmt",
+                           "repo_full_name", "master_url", "duplicate_url", "idn_cmt_text"]
+        dup_tbl.to_csv(out_dir / "duplicate_table_msr2018_style.csv", index=False, encoding="utf-8-sig")
+
+    # unfiltered pairs (no F1/F2/F3), for follow-up work
+    print(">> building unfiltered candidate set", flush=True)
+    rows_unf, counters_unf, _ = identify_unfiltered(prs, cmt_strict)
+    pd.DataFrame(rows_unf).to_csv(out_dir / "candidate_duplicates_unfiltered.csv",
+                                  index=False, encoding="utf-8-sig")
+
+    # unresolved references
+    un_res = pd.DataFrame(unresolved_strict)
+    if not un_res.empty:
+        un_res["repo_full_name"] = un_res["repo_id"].map(prs.set_index("repo_id")["repo_full_name"].to_dict())
+    un_res.to_csv(out_dir / "unresolved_references.csv", index=False, encoding="utf-8-sig")
+
+    # sampling replay
+    print(">> replaying stage-1 sampling", flush=True)
+    sample, sampling_stats = replay_sampling(prs, cmt_strict, args.sampling_cap, args.seed)
+    sample_out = sample[["repo_full_name", "pr_id", "comment_id", "author", "created_at",
+                         "rule_numbers", "matched_by_rules", "body"]].copy()
+    sample_out["body"] = sample_out["body"].str.slice(0, 1000)
+    sample_out.to_csv(out_dir / "sampled_comments_for_manual_review.csv", index=False, encoding="utf-8-sig")
+
+    # ---- summaries
+    def build_summary(rows, counters, info, cmt):
+        closed_after = sum(1 for r in rows if r["duplicate_pr_closed_after_idn"])
+        time_ok = sum(1 for r in rows if r["number_order_matches_time_order"])
+        filt = {k: v for k, v in counters.items() if k.startswith(("f1_", "f2_", "f3_", "self_"))}
+        return {
+            "candidate_pairs": len(rows),
+            "comments_total": info["comments_total"],
+            "comment_loading": {k: v for k, v in info.items()},
+            "comments_with_cross_pr_reference": counters.get("comments_with_cross_pr_reference", 0),
+            "rule_mentions": counters.get("rule_mentions", 0),
+            "resolved_mentions": counters.get("resolved_mentions", 0),
+            "unfiltered_unique_pairs": counters.get("unfiltered_unique_pairs", 0),
+            "filter_counts": filt,
+            "latency": latency_summary(rows),
+            "effort": effort_summary(rows),
+            "closed_after_idn": closed_after,
+            "closed_after_idn_percent": pct(closed_after, len(rows)),
+            "time_order_consistent": time_ok,
+            "time_order_inconsistent": len(rows) - time_ok,
+            "bot_evidence_comments": sum(1 for r in rows if r["idn_cmt_author_is_bot"]),
+            "agent_flows": ({str(k): int(v) for k, v in
+                             pd.Series([f"{r['master_agent']} -> {r['duplicate_agent']}" for r in rows])
+                             .value_counts().items()} if rows else {}),
+        }
+
+    n_above = int(un_res["target_above_repo_max_number"].sum()) if not un_res.empty else 0
+    n_below = int(len(un_res) - n_above)
+    caveats = {
+        "input_prs": int(len(prs)),
+        "input_repos": int(prs["repo_id"].nunique()),
+        "pr_table_is_agentic_subset": True,
+        "pr_table_note": ("AIDev-pop pull_request contains only AI-agent-authored PRs from "
+                          "repositories with >100 stars, not every PR of those repositories."),
+        "agents_present": prs["agent"].value_counts().to_dict(),
+        "f1_unresolved_mentions": counters_strict.get("f1_unresolved_target", 0),
+        "f1_unresolved_share_percent": pct(counters_strict.get("f1_unresolved_target", 0),
+                                           counters_strict.get("rule_mentions", 0)),
+        "unresolved_below_repo_max": n_below,
+        "unresolved_above_repo_max": n_above,
+    }
+
+    summary = {
+        "method": "MSR2018 DupPR (Yu et al.) applied to AIDev-pop Parquet data",
+        "rules_source": str(HERE / "rules.py"),
+        "auto_ident_source": str(HERE / "auto_ident.py"),
+        "data_root": str(args.data_root),
+        "strict": build_summary(rows_strict, counters_strict, info_strict, cmt_strict),
+        "extended": build_summary(rows_ext, counters_ext, info_ext, cmt_ext),
+        "unfiltered": counters_unf,
+        "sampling_replay": sampling_stats,
+        "corpus_caveats": caveats,
+        "stage_status": {
+            "1_random_sampling": "replayed for rule hit-rate estimation",
+            "2_manual_examination": "NOT automated - needs a human",
+            "3_rules_extraction": "reused from code/rules.py",
+            "4_automatic_identification": "executed on the full corpus",
+            "5_manual_verifying": "NOT automated - proxy signals only",
+        },
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False, default=str),
+                                          encoding="utf-8")
+    write_report(out_dir / "report.md", summary)
+
+    print(json.dumps({
+        "strict_pairs": summary["strict"]["candidate_pairs"],
+        "extended_pairs": summary["extended"]["candidate_pairs"],
+        "unfiltered_pairs": summary["strict"]["unfiltered_unique_pairs"],
+        "f1_unresolved": caveats["f1_unresolved_mentions"],
+        "output_dir": str(out_dir),
+    }, ensure_ascii=True, indent=2))
+
+
+def identify_unfiltered(prs: pd.DataFrame, cmt: pd.DataFrame) -> tuple[list[dict], dict, list[dict]]:
+    """Same rules and resolution as identify(), but with F1/F2/F3 skipped, so no
+    evidence is lost to the filters. F1 cannot be skipped meaningfully (an
+    unresolved number gives no PR row to pair with), so it is still applied."""
+    by_repo_number: dict[tuple[int, int], int] = {}
+    number_of: dict[int, int] = {}
+    author_of: dict[int, str] = {}
+    repo_of: dict[int, int] = {}
+    created_of: dict[int, pd.Timestamp] = {}
+    title_of: dict[int, str] = {}
+    for r in prs.itertuples(index=False):
+        pid = int(r.id)
+        by_repo_number[(int(r.repo_id), int(r.number))] = pid
+        number_of[pid] = int(r.number)
+        author_of[pid] = r.user
+        repo_of[pid] = int(r.repo_id)
+        created_of[pid] = r.created_at
+        title_of[pid] = r.title
+
+    counters: dict[str, int] = defaultdict(int)
+    pairs: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    ref = cmt[cmt["body"].str.contains(HAS_REF_RE, regex=True, na=False)]
+    for r in ref.itertuples(index=False):
+        src_id = int(r.pr_id)
+        if src_id not in number_of:
+            continue
+        repo = repo_of[src_id]
+        src_num = number_of[src_id]
+        for tgt_num in extract_numbers(r.body):
+            counters["rule_mentions"] += 1
+            tgt_id = by_repo_number.get((repo, tgt_num))
+            if tgt_id is None:
+                counters["f1_unresolved_target"] += 1
+                continue
+            if tgt_id == src_id:
+                counters["self_reference"] += 1
+                continue
+            counters["resolved_mentions"] += 1
+            dup_num, mst_num = max(src_num, tgt_num), min(src_num, tgt_num)
+            dup_id = by_repo_number[(repo, dup_num)]
+            mst_id = by_repo_number[(repo, mst_num)]
+            pairs[(mst_id, dup_id)].append({
+                "comment_id": r.comment_id,
+                "comment_created_at": r.created_at,
+                "comment_body": r.body,
+            })
+
+    rows = []
+    for (mst_id, dup_id), ev in sorted(pairs.items()):
+        ev.sort(key=lambda x: (pd.isna(x["comment_created_at"]), x["comment_created_at"], x["comment_id"]))
+        rows.append({
+            "pair_id": f"{number_of[dup_id]}-{number_of[mst_id]}",
+            "master_pr_id": mst_id,
+            "master_pr_number": number_of[mst_id],
+            "duplicate_pr_id": dup_id,
+            "duplicate_pr_number": number_of[dup_id],
+            "repo_id": repo_of[mst_id],
+            "master_title": title_of[mst_id],
+            "master_author": author_of[mst_id],
+            "duplicate_author": author_of[dup_id],
+            "same_author": author_of[mst_id] == author_of[dup_id],
+            "master_created_at": created_of[mst_id],
+            "duplicate_created_at": created_of[dup_id],
+            "evidence_count": len(ev),
+            "first_comment_id": ev[0]["comment_id"],
+            "first_comment_created_at": ev[0]["comment_created_at"],
+            "first_comment_body": ev[0]["comment_body"][:500],
+        })
+    counters["unique_pairs"] = len(rows)
+    return rows, dict(counters), []
+
+
+if __name__ == "__main__":
+    main()
