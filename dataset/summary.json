@@ -1,0 +1,21 @@
+{
+  "dataset": "AIDev v5-pop",
+  "sources": [
+    "pr_comments",
+    "pr_reviews"
+  ],
+  "input_prs": 361296,
+  "input_events": 654719,
+  "pairs": 912,
+  "counts": {
+    "rule_mentions": 2774,
+    "unresolved_references": 1636,
+    "self_references": 70,
+    "resolved_references": 1068,
+    "unique_pairs": 912,
+    "pairs_only_pr_comments": 894,
+    "pairs_only_pr_reviews": 13,
+    "pairs_both_sources": 5
+  },
+  "output": "results\\comments_reviews\\candidate_pairs_comments_reviews.csv"
+}
