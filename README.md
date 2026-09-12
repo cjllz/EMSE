@@ -14,6 +14,21 @@ code/rules.py从 AIDev popv5数据中筛选出 899 对可能有关联的 PR。
 
 规则三：直接出现“duplicate + PR 编号”
 
+
+code/auto_ident.py主要流程是：
+1. 读取评论；
+2. 调用 rules.py 里的正则；
+3. 找到评论中提到的 PR；
+4. 组成候选 PR 对；
+5. 原始代码还会过滤同作者等情况。
+
+code/reproduce.py
+1. 从 AIDev 的 Parquet 文件读取 PR 和评论；
+2. 调用 rules.py 中的正则规则，从评论里找出被提到的 PR 编号；
+3. 根据两个 PR 的编号和仓库，组成候选 PR 对；
+4. 保留全部正则命中的候选对，得到 899 对；
+5. 把结果保存成 CSV 和 summary.json，方便我们后续分析。
+
 `dataset.csv` 是本研究得到的 899 对数据。
 
 每一行代表一对 PR，包含：
