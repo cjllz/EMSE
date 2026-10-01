@@ -29,6 +29,3 @@ These rules were used only to identify candidate pairs. All duplicate relationsh
 
 Citation information will be added after publication.
 
-## License
-
-See [LICENSE](LICENSE).
