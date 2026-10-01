@@ -1,49 +1,34 @@
-# EMSE
+# When Agents Duplicate Work
 
-## 数据集
+This repository contains the dataset and supporting scripts for our empirical study of duplicate pull requests in agentic software development.
 
+## Dataset
 
+`dataset.csv` contains **816 manually verified duplicate PR pairs**, involving **1,471 Agentic PRs** collected from AIDev-pop v5.
 
-code/rules.py从 AIDev popv5数据中筛选出 899 对可能有关联的 PR。
+Each row represents one duplicate PR pair and includes:
 
-筛选规则如下：
+- Basic information about the earlier and later PRs
+- Submitter and coding-agent information
+- The earliest evidence identifying the duplicate relationship
+- The emergence context and classification rationale
 
-规则一：先说“关闭/替代/修复”，后面出现 PR 编号
+## Code
 
-规则二：先出现 PR 编号，后面说“重复/替代/修复”
+The scripts in `code/` were used to identify candidate duplicate PR pairs from PR comments, reviews, and inline review comments. Candidate pairs were detected using three main rules:
 
-规则三：直接出现“duplicate + PR 编号”
+1. A closure, supersession, or fix expression appears before a referenced PR number.
+2. A PR number appears before an expression indicating duplication, supersession, or a fix.
+3. The text explicitly contains “duplicate” followed by a PR number.
 
+These rules were used only to identify candidate pairs. All duplicate relationships included in the final dataset were manually verified.
 
-code/auto_ident.py主要流程是：
-1. 读取评论；
-2. 调用 rules.py 里的正则；
-3. 找到评论中提到的 PR；
-4. 组成候选 PR 对；
-5. 原始代码还会过滤同作者等情况。
+## Paper
 
-code/reproduce.py
-1. 从 AIDev 的 Parquet 文件读取 PR 和评论；
-2. 调用 rules.py 中的正则规则，从评论里找出被提到的 PR 编号；
-3. 根据两个 PR 的编号和仓库，组成候选 PR 对；
-4. 保留全部正则命中的候选对，得到 936 对；
-5. 把结果保存成 CSV 和 summary.json，方便我们后续分析。
+**When Agents Duplicate Work: An Empirical Study of Duplicate Pull Requests in Agentic Software Development**
 
-`dataset.csv` 是本研究经过人工复核得到的 900 对数据。
+Citation information will be added after publication.
 
-每一行代表一对 PR，包含：
+## License
 
-- 项目名称、项目 ID
-- 两个 PR 的编号
-- 两个 PR 的数据库 ID
-- 两个 PR 的链接
-- 两个 PR 的标题
-- 两个 PR 的作者
-- 两个 PR 使用的 AI 工具
-- 两个 PR 的创建时间
-- 第一条关系证据的 ID
-- 关系证据时间
-- 关系证据链接
-- 证据来源：普通评论或正式 Review
-- 证据发布者类型和角色
-- 证据数量
+See [LICENSE](LICENSE).
